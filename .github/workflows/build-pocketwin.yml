@@ -92,13 +92,59 @@ jobs:
               -print -delete
           fi
 
+      - name: Configure Gradle for large bundled EXE
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR="$RUNNER_TEMP/winlator-app"
+          python3 - "$PROJECT_DIR/app/build.gradle" "$PROJECT_DIR/gradle.properties" <<'PYCODE'
+          from pathlib import Path
+          import re
+          import sys
+
+          gradle_file = Path(sys.argv[1])
+          properties_file = Path(sys.argv[2])
+          text = gradle_file.read_text(encoding="utf-8")
+          uncompressed_exe = re.compile(r"noCompress\s*\+=\s*\[[^\]]*['\"]exe['\"][^\]]*\]")
+          if not uncompressed_exe.search(text):
+              android_resources = re.search(r"(?s)androidResources\s*\{([^{}]*)\}", text)
+              if android_resources:
+                  block = android_resources.group(0)
+                  block_body = android_resources.group(1)
+                  if "noCompress" in block_body:
+                      block = block[:-1] + "\n        noCompress += ['exe']\n    }"
+                  else:
+                      block = block[:-1] + "\n        noCompress += ['exe']\n    }"
+                  text = text[:android_resources.start()] + block + text[android_resources.end():]
+              else:
+                  text, count = re.subn(r"(?m)^(\s*android\s*\{\s*)", lambda m: m.group(1) + "\n    androidResources {\n        noCompress += ['exe']\n    }\n", text, count=1)
+                  if count != 1:
+                      raise SystemExit("Could not safely configure Android noCompress for EXE assets.")
+              gradle_file.write_text(text, encoding="utf-8")
+              print("Configured Android packaging to keep .exe assets uncompressed.")
+          else:
+              print("Android packaging already marks .exe assets as uncompressed.")
+
+          properties = properties_file.read_text(encoding="utf-8").splitlines() if properties_file.exists() else []
+          settings = {
+              "org.gradle.jvmargs": "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8",
+              "org.gradle.workers.max": "2",
+              "org.gradle.parallel": "false",
+          }
+          keys = set(settings)
+          properties = [line for line in properties if not any(line.strip().startswith(key + "=") for key in keys)]
+          properties.extend(f"{key}={value}" for key, value in settings.items())
+          properties_file.write_text("\n".join(properties).rstrip() + "\n", encoding="utf-8")
+          print("Gradle memory configured: -Xmx4g, maximum 2 workers, parallel build disabled.")
+          PYCODE
+
       - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/winlator-app"
           chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace :app:assembleDebug "-PpocketwinExe=$POCKETWIN_EXE"
+          ./gradlew --no-daemon --max-workers=2 --stacktrace :app:assembleDebug "-PpocketwinExe=$POCKETWIN_EXE"
           test -s app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK artifact
