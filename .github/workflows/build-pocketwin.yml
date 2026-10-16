@@ -29,6 +29,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Avoid the removed Android SDK tools package.
+          packages: platform-tools
 
       - name: Install Android SDK, NDK and CMake
         shell: bash
@@ -36,7 +39,6 @@ jobs:
           set -e
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --install \
-            "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;24.0.8215888" \
