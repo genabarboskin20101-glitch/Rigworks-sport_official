@@ -79,6 +79,19 @@ jobs:
           set -euo pipefail
           python3 "$POCKETWIN_PATCHER" --source "$RUNNER_TEMP/winlator-app" --app-name "$APP_NAME"
 
+      # Backward compatibility: old integration ZIPs created backup files inside res/.
+      # Android Gradle Plugin rejects e.g. strings.xml.pocketwin-backup as an Android resource.
+      - name: Remove legacy patch backups from Android resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          RES_DIR="$RUNNER_TEMP/winlator-app/app/src/main/res"
+          if [[ -d "$RES_DIR" ]]; then
+            find "$RES_DIR" -type f \
+              \( -name '*.pocketwin-backup' -o -name '*.pocketwin-tmp' \) \
+              -print -delete
+          fi
+
       - name: Build debug APK
         shell: bash
         run: |
