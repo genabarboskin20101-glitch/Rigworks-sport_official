@@ -1,4 +1,4 @@
-name: Build Termux Native Bridge DEX
+name: Build Termux Native Bridge DEX and GNU Bash
 
 on:
   workflow_dispatch:
@@ -28,12 +28,13 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      - name: Install Android platform and D8
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Install Android platform, D8, and NDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'
 
       - name: Extract bridge source archive
         shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PYZIP'
           import zipfile
           from pathlib import Path
@@ -55,7 +56,7 @@ jobs:
           test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/TermuxBridge.java
           test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/BridgePickerActivity.java
 
-      - name: Compile Java sources against Android SDK
+      - name: Compile Java bridge sources against Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +71,7 @@ jobs:
           test -f classes/org/webterm/bridge/TermuxBridge.class
           test -f classes/org/webterm/bridge/BridgePickerActivity.class
           javap -classpath classes org.webterm.bridge.TermuxBridge | grep -q 'runDiagnosticCommand'
+          javap -classpath classes org.webterm.bridge.TermuxBridge | grep -q 'runBashCommand'
 
       - name: Convert classes to DEX and verify bridge classes
         shell: bash
@@ -98,9 +100,10 @@ jobs:
               if name not in data:
                   raise SystemExit('DEX is missing required class descriptor: ' + name.decode())
               print('Found class:', name.decode())
-          if b'runDiagnosticCommand' not in data:
-              raise SystemExit('DEX is missing runDiagnosticCommand (native diagnostics API)')
-          print('Found method: runDiagnosticCommand (fixed allowlist only)')
+          for name in (b'runDiagnosticCommand', b'runBashCommand'):
+              if name not in data:
+                  raise SystemExit('DEX is missing required method: ' + name.decode())
+              print('Found method:', name.decode())
           print(f'Validated {p}: {len(data)} bytes; SHA-256 {hashlib.sha256(data).hexdigest()}')
           PYDEX
           file termux-bridge.dex
@@ -112,4 +115,94 @@ jobs:
           path: termux-bridge.dex
           if-no-files-found: error
           retention-days: 30
+
+      - name: Download and verify GNU Bash 5.3 source and security patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bash-work bash-patches bash-dist
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz -o bash-5.3.tar.gz
+          echo '0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba  bash-5.3.tar.gz' | sha256sum --check --status
+          tar -xzf bash-5.3.tar.gz -C bash-work
+          cat > /tmp/bash-patch-sha256.txt <<'HASHES'
+          001 1f608434364af86b9b45c8b0ea3fb3b165fb830d27697e6cdfc7ac17dee3287f
+          002 e385548a00130765ec7938a56fbdca52447ab41fabc95a25f19ade527e282001
+          003 f245d9c7dc3f5a20d84b53d249334747940936f09dc97e1dcb89fc3ab37d60ed
+          004 9591d245045529f32f0812f94180b9d9ce9023f5a765c039b852e5dfc99747d0
+          005 cca1ef52dbbf433bc98e33269b64b2c814028efe2538be1e2c9a377da90bc99d
+          006 29119addefed8eff91ae37fd51822c31780ee30d4a28376e96002706c995ff10
+          007 c0976bbfffa1453c7cfdd62058f206a318568ff2d690f5d4fa048793fa3eb299
+          008 097cd723cbfb8907674ac32214063a3fd85282657ec5b4e544d2c0f719653fb4
+          009 eee30fe78a4b0cb2fe20e010e00308899cfc613e0774ebb3c8557a1552f24f8c
+          010 cf76f1cce2ea300c18bff9f002d21f280cc931acd17c28518110b93fe6e72569
+          011 0298df8f5ea2a31d3be43ed7d269c5b3c7c342dd5b570bea7f64d66dcbbe7531
+          012 d71379b39bebaedaf123414414e77fb458a0a43b9ad3116594c6df7ca6754573
+          013 042f9cda967e24bf4211944697441e93d06ff42b4b998629a98a1b249279f200
+          014 bd4360b401d38507e358783dcad8536a99c6789f0d3a5bd0cfb8c4a34144696c
+          015 55b79ceee2fc27f6767eed697e939a7eb2fe2a28c01556bd75f18d581014f46e
+          016 9ea29b266b7d24cb34d0ff3f1c4631e4d527bfe2d1ef15d17cdb924bf31ef767
+          017 443b927b45c1558ca72052410f8b8f6e5152b617ed707061a2781d4375b0d1c3
+          018 ae715d76c50341d7d7095e9a8d2eeed1ca9546152c2ac7289206f90cf30ac697
+          019 a25c581e4d0057dea3833918438a930e2e86ee4c6dc17fe15267b7f04cbc4e3d
+          020 df217ed3a9122aa2286d9b67bbe348661b6a9db262b580c29150dae55d532896
+          HASHES
+          while read -r number hash; do
+            patchfile="bash53-${number}"
+            curl --fail --location --retry 3 --retry-delay 2 \
+              "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/${patchfile}" \
+              -o "bash-patches/${patchfile}"
+            echo "${hash}  bash-patches/${patchfile}" | sha256sum --check --status
+            patch --batch --forward -p0 -d bash-work/bash-5.3 < "bash-patches/${patchfile}"
+            echo "Applied verified patch ${patchfile}"
+          done < /tmp/bash-patch-sha256.txt
+          grep -q '#define PATCHLEVEL 20' bash-work/bash-5.3/patchlevel.h
+
+      - name: Build GNU Bash for Android ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bison make gawk patch clang
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          test -x "$TOOLCHAIN/bin/aarch64-linux-android28-clang"
+          cd bash-work/bash-5.3
+          export CC="$TOOLCHAIN/bin/aarch64-linux-android28-clang"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+          export CC_FOR_BUILD="$(command -v clang)"
+          export BUILD_CC="$(command -v clang)"
+          export CFLAGS='-O2 -fPIE'
+          export LDFLAGS='-pie -Wl,-z,max-page-size=16384 -Wl,--build-id=sha1'
+          ./configure \
+            --build=x86_64-pc-linux-gnu \
+            --host=aarch64-linux-android \
+            --prefix=/usr \
+            --without-bash-malloc \
+            --disable-nls \
+            --disable-readline
+          make -j2
+          test -x bash
+          cp bash "$GITHUB_WORKSPACE/bash-dist/libbash.so"
+          "$STRIP" --strip-unneeded "$GITHUB_WORKSPACE/bash-dist/libbash.so"
+          "$TOOLCHAIN/bin/llvm-readelf" -h "$GITHUB_WORKSPACE/bash-dist/libbash.so" | grep -q 'Machine:.*AArch64'
+          "$TOOLCHAIN/bin/llvm-readelf" -h "$GITHUB_WORKSPACE/bash-dist/libbash.so" | grep -q 'Type:.*DYN'
+          "$TOOLCHAIN/bin/llvm-readelf" -l "$GITHUB_WORKSPACE/bash-dist/libbash.so" | grep -Fq '/system/bin/linker64'
+          if "$TOOLCHAIN/bin/llvm-readelf" -d "$GITHUB_WORKSPACE/bash-dist/libbash.so" | grep -Eiq 'lib(readline|tinfo|termcap|intl|iconv)\.so'; then
+            echo 'Unexpected non-system shared dependency in Bash binary' >&2
+            exit 1
+          fi
+          file "$GITHUB_WORKSPACE/bash-dist/libbash.so"
+          sha256sum "$GITHUB_WORKSPACE/bash-dist/libbash.so"
+
+      - name: Upload verified GNU Bash ARM64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webterm-bash-arm64
+          path: bash-dist/libbash.so
+          if-no-files-found: error
+          retention-days: 30
+          
           
