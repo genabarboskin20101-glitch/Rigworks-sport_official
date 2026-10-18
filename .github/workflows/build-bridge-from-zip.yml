@@ -53,6 +53,7 @@ jobs:
           PYZIP
           test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/TermuxFactory.java
           test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/TermuxBridge.java
+          test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/BridgePickerActivity.java
 
       - name: Compile Java sources against Android SDK
         shell: bash
@@ -67,6 +68,7 @@ jobs:
             -classpath "$ANDROID_JAR" -d classes @sources.txt
           test -f classes/org/webterm/bridge/TermuxFactory.class
           test -f classes/org/webterm/bridge/TermuxBridge.class
+          test -f classes/org/webterm/bridge/BridgePickerActivity.class
 
       - name: Convert classes to DEX and verify bridge classes
         shell: bash
@@ -91,7 +93,7 @@ jobs:
               raise SystemExit('DEX SHA-1 signature validation failed')
           if (zlib.adler32(data[12:]) & 0xffffffff) != struct.unpack_from('<I', data, 8)[0]:
               raise SystemExit('DEX Adler-32 checksum validation failed')
-          for name in (b'Lorg/webterm/bridge/TermuxFactory;', b'Lorg/webterm/bridge/TermuxBridge;'):
+          for name in (b'Lorg/webterm/bridge/TermuxFactory;', b'Lorg/webterm/bridge/TermuxBridge;', b'Lorg/webterm/bridge/BridgePickerActivity;'):
               if name not in data:
                   raise SystemExit('DEX is missing required class descriptor: ' + name.decode())
               print('Found class:', name.decode())
