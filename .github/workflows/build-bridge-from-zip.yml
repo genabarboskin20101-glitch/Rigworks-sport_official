@@ -4,10 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'app/**'
-      - '*.gradle'
-      - 'settings.gradle'
-      - '.github/workflows/build-bridge.yml'
+      - 'Termux-Native-Bridge.zip'
 
 permissions:
   contents: read
@@ -16,29 +13,57 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install SDK platform and build tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK components
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Compile bridge classes
-        run: gradle --no-daemon :app:assembleDebug
-      - name: Extract classes.dex as bridge DEX
+
+      - name: Extract uploaded source ZIP
+        shell: bash
         run: |
-          unzip -p app/build/outputs/apk/debug/app-debug.apk classes.dex > termux-bridge.dex
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          archive = Path('Termux-Native-Bridge.zip')
+          if not archive.is_file():
+              raise SystemExit('Missing Termux-Native-Bridge.zip in repository root')
+          with zipfile.ZipFile(archive) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit(f'Corrupt archive entry: {bad}')
+              z.extractall('bridge-src')
+          PY
+          test -f bridge-src/Termux-Native-Bridge/app/build.gradle
+
+      - name: Build Android bridge
+        working-directory: bridge-src/Termux-Native-Bridge
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Extract DEX
+        shell: bash
+        run: |
+          unzip -p bridge-src/Termux-Native-Bridge/app/build/outputs/apk/debug/app-debug.apk classes.dex > termux-bridge.dex
           test -s termux-bridge.dex
           file termux-bridge.dex
-      - name: Upload bridge DEX
+
+      - name: Upload DEX artifact
         uses: actions/upload-artifact@v4
         with:
           name: termux-bridge-dex
