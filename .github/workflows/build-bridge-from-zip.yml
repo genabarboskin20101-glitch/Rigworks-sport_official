@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'Termux-Native-Bridge.zip'
+      - '.github/workflows/build-bridge-from-zip.yml'
 
 permissions:
   contents: read
@@ -22,48 +23,83 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
 
-      - name: Install Android SDK components
+      - name: Install Android platform and D8
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
-      - name: Extract uploaded source ZIP
+      - name: Extract bridge source archive
         shell: bash
         run: |
-          python3 - <<'PY'
+          python3 - <<'PYZIP'
           import zipfile
           from pathlib import Path
           archive = Path('Termux-Native-Bridge.zip')
           if not archive.is_file():
               raise SystemExit('Missing Termux-Native-Bridge.zip in repository root')
+          out = Path('bridge-src').resolve()
           with zipfile.ZipFile(archive) as z:
               bad = z.testzip()
               if bad:
-                  raise SystemExit(f'Corrupt archive entry: {bad}')
-              z.extractall('bridge-src')
-          PY
-          test -f bridge-src/Termux-Native-Bridge/app/build.gradle
+                  raise SystemExit(f'Corrupt ZIP entry: {bad}')
+              for entry in z.infolist():
+                  dest = (out / entry.filename).resolve()
+                  if dest != out and out not in dest.parents:
+                      raise SystemExit(f'Unsafe ZIP path: {entry.filename}')
+              z.extractall(out)
+          PYZIP
+          test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/TermuxFactory.java
+          test -f bridge-src/Termux-Native-Bridge/app/src/main/java/org/webterm/bridge/TermuxBridge.java
 
-      - name: Build Android bridge
-        working-directory: bridge-src/Termux-Native-Bridge
-        run: gradle --no-daemon :app:assembleDebug
-
-      - name: Extract DEX
+      - name: Compile Java sources against Android SDK
         shell: bash
         run: |
-          unzip -p bridge-src/Termux-Native-Bridge/app/build/outputs/apk/debug/app-debug.apk classes.dex > termux-bridge.dex
-          test -s termux-bridge.dex
+          set -euo pipefail
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          test -f "$ANDROID_JAR"
+          mkdir -p classes dex-out
+          find bridge-src/Termux-Native-Bridge/app/src/main/java -name '*.java' -print > sources.txt
+          test -s sources.txt
+          javac -source 8 -target 8 -encoding UTF-8 -Xlint:-options \
+            -classpath "$ANDROID_JAR" -d classes @sources.txt
+          test -f classes/org/webterm/bridge/TermuxFactory.class
+          test -f classes/org/webterm/bridge/TermuxBridge.class
+
+      - name: Convert classes to DEX and verify bridge classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          D8="$ANDROID_HOME/build-tools/35.0.0/d8"
+          mapfile -t CLASS_FILES < <(find classes -name '*.class' -print)
+          test "${#CLASS_FILES[@]}" -gt 0
+          "$D8" --min-api 28 --lib "$ANDROID_JAR" --output dex-out "${CLASS_FILES[@]}"
+          cp dex-out/classes.dex termux-bridge.dex
+          python3 - <<'PYDEX'
+          from pathlib import Path
+          import hashlib, struct, zlib
+          p = Path('termux-bridge.dex')
+          data = p.read_bytes()
+          if len(data) < 112 or not data.startswith(b'dex\n'):
+              raise SystemExit('Output is not a valid DEX file')
+          if struct.unpack_from('<I', data, 32)[0] != len(data):
+              raise SystemExit('DEX header file size does not match the output')
+          if hashlib.sha1(data[32:]).digest() != data[12:32]:
+              raise SystemExit('DEX SHA-1 signature validation failed')
+          if (zlib.adler32(data[12:]) & 0xffffffff) != struct.unpack_from('<I', data, 8)[0]:
+              raise SystemExit('DEX Adler-32 checksum validation failed')
+          for name in (b'Lorg/webterm/bridge/TermuxFactory;', b'Lorg/webterm/bridge/TermuxBridge;'):
+              if name not in data:
+                  raise SystemExit('DEX is missing required class descriptor: ' + name.decode())
+              print('Found class:', name.decode())
+          print(f'Validated {p}: {len(data)} bytes; SHA-256 {hashlib.sha256(data).hexdigest()}')
+          PYDEX
           file termux-bridge.dex
 
-      - name: Upload DEX artifact
+      - name: Upload verified DEX artifact
         uses: actions/upload-artifact@v4
         with:
           name: termux-bridge-dex
