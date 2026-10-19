@@ -1,0 +1,58 @@
+name: Build Lira AI APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Get source files
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.13113456" \
+            "cmake;3.31.6"
+
+      - name: Unpack project and fetch llama.cpp
+        run: |
+          test -f lira_ai_offline_android_source.zip
+          mkdir -p source
+          unzip -q lira_ai_offline_android_source.zip -d source
+          cd source/lira_offline_kit/android
+          bash prepare.sh
+          # This starter app is arm64-only; avoid compiling an unused x86_64 native library.
+          sed -i 's/listOf("arm64-v8a", "x86_64")/listOf("arm64-v8a")/' \
+            vendor/llama.cpp/examples/llama.android/lib/build.gradle.kts
+
+      - name: Build debug APK
+        working-directory: source/lira_offline_kit/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiraAI-debug-APK
+          path: source/lira_offline_kit/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
