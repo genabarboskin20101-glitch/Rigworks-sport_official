@@ -23,7 +23,6 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          # Avoid the discontinued SDK package "tools" requested by setup-android v3.
           packages: 'platform-tools'
 
       - name: Install Android SDK, NDK and CMake
@@ -45,6 +44,41 @@ jobs:
           # This starter app is arm64-only; avoid compiling an unused x86_64 native library.
           sed -i 's/listOf("arm64-v8a", "x86_64")/listOf("arm64-v8a")/' \
             vendor/llama.cpp/examples/llama.android/lib/build.gradle.kts
+
+      - name: Migrate Kotlin compiler options
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("source/lira_offline_kit/android/app/build.gradle.kts")
+          text = path.read_text(encoding="utf-8")
+          legacy = '    kotlinOptions { jvmTarget = "17" }\n'
+
+          if legacy in text:
+              text = text.replace(legacy, "", 1)
+              marker = "}\n\nandroid {\n"
+              replacement = (
+                  "}\n\n"
+                  "kotlin {\n"
+                  "    compilerOptions {\n"
+                  "        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)\n"
+                  "    }\n"
+                  "}\n\n"
+                  "android {\n"
+              )
+              if marker not in text:
+                  raise SystemExit("Cannot find insertion point for Kotlin compilerOptions block")
+              text = text.replace(marker, replacement, 1)
+              path.write_text(text, encoding="utf-8")
+              print("Migrated app/build.gradle.kts to kotlin.compilerOptions.")
+          elif "compilerOptions" in text and "JvmTarget.JVM_17" in text:
+              print("Kotlin compiler options are already migrated; no change needed.")
+          else:
+              raise SystemExit("Unexpected app/build.gradle.kts format; refusing to patch blindly.")
+          PY
+          echo "--- Updated app/build.gradle.kts ---"
+          sed -n '1,55p' source/lira_offline_kit/android/app/build.gradle.kts
 
       - name: Build debug APK
         working-directory: source/lira_offline_kit/android
