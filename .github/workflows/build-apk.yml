@@ -35,28 +35,33 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Check project files
+      - name: Find project
         shell: bash
         run: |
-          for f in app/build.gradle settings.gradle build.gradle signing/lmusic.keystore \
-                   app/src/main/AndroidManifest.xml app/src/main/assets/www/index.html \
-                   app/src/main/java/com/lmusic/app/WebViewActivity.java app/src/main/java/kx/engine/KxBridge.java; do
-            [ -f "$f" ] || { echo "::error::Нет файла $f — архив распакован не в корень репозитория?"; exit 1; }
+          # проект ищем сами: он может лежать в корне репозитория или во вложенной папке (если архив распаковали «в папку»)
+          S="$(find . -maxdepth 4 -name settings.gradle -not -path './.git/*' | head -1)"
+          [ -n "$S" ] || { echo "::error::settings.gradle не найден — файлы проекта из архива не загружены в репозиторий"; ls -R . | head -50; exit 1; }
+          PROJ="$(dirname "$S")"
+          for f in app/build.gradle build.gradle signing/lmusic.keystore app/src/main/AndroidManifest.xml \
+                   app/src/main/assets/www/index.html app/src/main/java/com/lmusic/app/WebViewActivity.java app/src/main/java/kx/engine/KxBridge.java; do
+            [ -f "$PROJ/$f" ] || { echo "::error::Нет файла $PROJ/$f"; exit 1; }
           done
-          echo "Структура проекта в порядке"
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Проект найден: $PROJ"
 
       - name: Build APK
         shell: bash
         run: |
           set -o pipefail
-          gradle --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee build.log
+          cd "$PROJ"
+          gradle --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
       - name: Verify signature
         shell: bash
         run: |
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           BT="$(ls -1 "$SDK/build-tools" | sort -V | tail -1)"
-          APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
+          APK="$(ls "$PROJ"/app/build/outputs/apk/release/*.apk | head -1)"
           cp "$APK" LMusic.apk
           "$SDK/build-tools/$BT/apksigner" verify --print-certs LMusic.apk | tee sign.log
           sha256sum LMusic.apk | tee LMusic.apk.sha256
@@ -97,3 +102,4 @@ jobs:
             tail -n 80 build.log 2>/dev/null || echo "(лога нет — упал шаг до сборки)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          
