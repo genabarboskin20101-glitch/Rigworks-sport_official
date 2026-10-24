@@ -1,0 +1,164 @@
+name: Build LMusic APK
+
+# Собирает приложение LMusic целиком (WebView-оболочка + app/src/main/assets/www/index.html + нативный мост kx.engine)
+# и подписывает его ключом из signing/lmusic.keystore.
+# Запускается сам при каждом коммите (push) и вручную: вкладка Actions → Build LMusic APK → Run workflow.
+# Результат: Releases → lmusic-latest → LMusic.apk (стабильная ссылка), а также артефакт LMusic-apk внизу страницы запуска.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Поддерживаются распакованный проект, LMusic-project.zip,
+      # LMusic-GitHub-ready.zip и другие ZIP с проектом внутри.
+      - name: Prepare project files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f "$GITHUB_WORKSPACE/app/build.gradle" ]]; then
+            echo "Проект уже находится в корне репозитория"
+            exit 0
+          fi
+
+          declare -a ARCHIVES=()
+          # Сначала проверяем имена из инструкций, затем любые другие ZIP.
+          for wanted in "LMusic-GitHub-ready.zip" "LMusic-project.zip"; do
+            while IFS= read -r file; do
+              [[ -n "$file" ]] && ARCHIVES+=("$file")
+            done < <(find "$GITHUB_WORKSPACE" -path "$GITHUB_WORKSPACE/.git" -prune -o -type f -iname "$wanted" -print)
+          done
+          while IFS= read -r file; do
+            case "${file##*/}" in
+              LMusic-GitHub-ready.zip|LMusic-project.zip) continue ;;
+            esac
+            [[ -n "$file" ]] && ARCHIVES+=("$file")
+          done < <(find "$GITHUB_WORKSPACE" -path "$GITHUB_WORKSPACE/.git" -prune -o -type f -iname '*.zip' -print | sort)
+
+          if (( ${#ARCHIVES[@]} == 0 )); then
+            echo "::error::В репозитории нет app/build.gradle и нет ZIP-архива с проектом. Добавьте в корень репозитория содержимое LMusic-GitHub-ready.zip (включая папку app/) ИЛИ сам архив LMusic-GitHub-ready.zip / LMusic-project.zip. Одного build-apk.yml недостаточно для сборки APK."
+            echo "Файлы, которые GitHub Actions видит в корне репозитория:"
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -not -path '*/.git/*' -printf '%P\n' | sort | head -n 100
+            exit 1
+          fi
+
+          TEMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+          FOUND_PROJECT=""
+          INDEX=0
+          for archive in "${ARCHIVES[@]}"; do
+            INDEX=$((INDEX + 1))
+            EXTRACT_DIR="$TEMP_DIR/archive-$INDEX"
+            mkdir -p "$EXTRACT_DIR"
+            echo "Проверяю архив: ${archive#"$GITHUB_WORKSPACE"/}"
+            if ! unzip -q "$archive" -d "$EXTRACT_DIR"; then
+              echo "Предупреждение: не удалось распаковать $archive; проверяю следующий архив"
+              continue
+            fi
+            GRADLE_FILE="$(find "$EXTRACT_DIR" -type f -path '*/app/build.gradle' -print -quit || true)"
+            if [[ -n "$GRADLE_FILE" ]]; then
+              FOUND_PROJECT="${GRADLE_FILE%/app/build.gradle}"
+              echo "Проект найден в архиве: ${archive#"$GITHUB_WORKSPACE"/}"
+              break
+            fi
+          done
+
+          if [[ -z "$FOUND_PROJECT" ]]; then
+            echo "::error::ZIP-архивы найдены, но ни в одном не обнаружен app/build.gradle. Убедитесь, что загружен архив исходного проекта LMusic, а не только workflow."
+            exit 1
+          fi
+
+          cp -a "$FOUND_PROJECT/." "$GITHUB_WORKSPACE/"
+          if [[ ! -f "$GITHUB_WORKSPACE/app/build.gradle" ]]; then
+            echo "::error::Не удалось подготовить проект в корне репозитория"
+            exit 1
+          fi
+          echo "Проект успешно подготовлен"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+
+      - name: Check project files
+        shell: bash
+        run: |
+          for f in app/build.gradle settings.gradle build.gradle signing/lmusic.keystore \
+                   app/src/main/AndroidManifest.xml app/src/main/assets/www/index.html \
+                   app/src/main/java/com/lmusic/app/WebViewActivity.java app/src/main/java/kx/engine/KxBridge.java; do
+            [ -f "$f" ] || { echo "::error::Нет файла $f — архив распакован не в корень репозитория?"; exit 1; }
+          done
+          echo "Структура проекта в порядке"
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee build.log
+
+      - name: Verify signature
+        shell: bash
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BT="$(ls -1 "$SDK/build-tools" | sort -V | tail -1)"
+          APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
+          cp "$APK" LMusic.apk
+          "$SDK/build-tools/$BT/apksigner" verify --print-certs LMusic.apk | tee sign.log
+          sha256sum LMusic.apk | tee LMusic.apk.sha256
+          ls -l LMusic.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: LMusic-apk
+          path: |
+            LMusic.apk
+            LMusic.apk.sha256
+
+      - name: Publish release lmusic-latest
+        shell: bash
+        run: |
+          SHA="$(cut -d' ' -f1 LMusic.apk.sha256)"
+          gh release delete lmusic-latest --cleanup-tag --yes >/dev/null 2>&1 || true
+          gh release create lmusic-latest LMusic.apk LMusic.apk.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "LMusic (сборка #${GITHUB_RUN_NUMBER})" \
+            --notes "SHA-256: $SHA"
+          {
+            echo "### LMusic.apk готов"
+            echo "Версия: 1.0.${GITHUB_RUN_NUMBER}"
+            echo "SHA-256: \`$SHA\`"
+            echo "Размер: $(stat -c %s LMusic.apk) байт"
+            echo "Скачать: Releases → lmusic-latest → LMusic.apk"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show log in summary on failure
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### Сборка упала — последние строки лога"
+            echo '```'
+            tail -n 80 build.log 2>/dev/null || echo "(лога нет — упал шаг до сборки)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
